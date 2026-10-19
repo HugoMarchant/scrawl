@@ -134,10 +134,64 @@ pub fn copy_png_to_clipboard(png_bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// The contact sheet and the summary on one pasteboard. A composer that takes images attaches
+/// the sheet; one that does not pastes the text.
+#[cfg(target_os = "macos")]
+pub fn copy_png_and_string_to_clipboard(png_bytes: &[u8], content: &str) -> Result<()> {
+    use objc2_app_kit::{NSPasteboard, NSPasteboardTypePNG, NSPasteboardTypeString};
+    use objc2_foundation::{NSArray, NSData, NSString};
+
+    let data = NSData::with_bytes(png_bytes);
+    let text = NSString::from_str(content);
+    let pasteboard = NSPasteboard::generalPasteboard();
+    unsafe {
+        let types = NSArray::from_slice(&[NSPasteboardTypePNG, NSPasteboardTypeString]);
+        pasteboard.clearContents();
+        pasteboard.declareTypes_owner(&types, None);
+        ensure!(
+            pasteboard.setData_forType(Some(&data), NSPasteboardTypePNG),
+            "Could not copy PNG image to clipboard"
+        );
+        ensure!(
+            pasteboard.setString_forType(&text, NSPasteboardTypeString),
+            "Could not copy text to clipboard"
+        );
+    }
+    Ok(())
+}
+
+/// `summary.md` for a pasteboard. With `attachImages` it names no path on this Mac, since the
+/// agent reading it cannot open one.
+pub fn paste_summary(bundle: &ScrawlBundle, bundle_dir: &Path) -> String {
+    let summary = crate::sketch::summary_markdown(bundle, bundle_dir);
+    if !experiment(ATTACH_IMAGES) {
+        return summary;
+    }
+    summary
+        .split_inclusive('\n')
+        .map(|line| {
+            if line.starts_with("[scrawl ") {
+                line.replace(&format!(" · {}]", bundle_dir.display()), "]")
+            } else if line.starts_with("Cropped to: ")
+                && let Some((label, _)) = line.split_once(" (full frames in ")
+            {
+                format!("{label}\n")
+            } else {
+                line.to_owned()
+            }
+        })
+        .collect()
+}
+
 #[cfg(target_os = "macos")]
 pub fn copy_bundle_to_clipboard(bundle_dir: &Path) -> Result<()> {
     let (directory, bundle) = load_bundle(bundle_dir)?;
-    let summary = crate::sketch::summary_markdown(&bundle, &directory);
+    let summary = paste_summary(&bundle, &directory);
+    if experiment(ATTACH_IMAGES) {
+        let image = fs::read(directory.join(&bundle.contact_sheet))
+            .context("Could not read contact sheet")?;
+        return copy_png_and_string_to_clipboard(&image, &summary);
+    }
     copy_string_to_clipboard(&summary)
 }
 
@@ -160,11 +214,17 @@ pub fn paste_bundle_image_and_text(bundle_dir: &Path) -> Result<()> {
     let (directory, bundle) = load_bundle(bundle_dir)?;
     let sheet_path = directory.join(&bundle.contact_sheet);
     let image = fs::read(&sheet_path).context("Could not read contact sheet")?;
-    let summary = crate::sketch::summary_markdown(&bundle, &directory);
+    let terminal = crate::capture::is_frontmost_terminal();
+    // A terminal gets the sheet's path, so its summary keeps the paths too.
+    let summary = if terminal {
+        crate::sketch::summary_markdown(&bundle, &directory)
+    } else {
+        paste_summary(&bundle, &directory)
+    };
 
     crate::capture::wait_for_modifiers_released(350);
 
-    if crate::capture::is_frontmost_terminal() {
+    if terminal {
         // In terminals (Ghostty / OpenCode TUI / Claude Code), pasting the image path first
         // resolves and attaches `[Image 1]`, and the second paste inserts the text summary.
         copy_string_to_clipboard(&sheet_path.display().to_string())?;
@@ -396,6 +456,10 @@ pub const AGENT_CONTEXT: &str = "agentContext";
 /// Transcribe Mac recordings while they record, so finishing only waits for the last words
 /// (`live_transcribe`).
 pub const LIVE_TRANSCRIBE: &str = "liveTranscribe";
+
+/// Pastes carry the contact sheet as image data and a summary without paths on this Mac, for
+/// composers whose agent runs on another machine (T3 Code on a remote VM).
+pub const ATTACH_IMAGES: &str = "attachImages";
 
 static EXPERIMENT_OVERRIDES: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
