@@ -1,6 +1,8 @@
 name: Build Scrawl.app
 
 on:
+  push:
+    branches: [attach-images]
   workflow_dispatch:
 
 jobs:
