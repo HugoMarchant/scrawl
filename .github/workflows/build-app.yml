@@ -1,0 +1,20 @@
+name: Build Scrawl.app
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build and ad-hoc sign Scrawl.app
+        run: SCRAWL_APP_DIR="$PWD/dist/Scrawl.app" SCRAWL_NO_LAUNCH=1 ./scripts/install-app.sh
+      - name: Zip
+        run: ditto -c -k --keepParent dist/Scrawl.app dist/Scrawl.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Scrawl
+          path: dist/Scrawl.zip
